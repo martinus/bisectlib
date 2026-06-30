@@ -169,8 +169,8 @@ and benchmarking live (the old `flaky`/`benchmark` ideas folded in here).
 test(cmd,
     attempts=1,         # MAX number of tries (default: single run)
     min_passes=None,    # passes required for good; default None = all attempts
-    max_median=None,    # seconds; passing-but-slower-than-this => BAD
-    warmup=0,           # extra leading throwaway runs (excluded from passes & timing)
+    passed=None,        # callable(Result)->bool: did one attempt pass? default r.ok
+    warmup=0,           # extra leading throwaway runs (excluded from the pass count)
     bad_when="fail",    # "fail"(default) | "pass" to invert the bug direction
     timeout=None,
     on_timeout="skip",  # "skip"(default) | "bad" | "abort"
@@ -179,18 +179,23 @@ test(cmd,
 
 Evaluation **stops as soon as the verdict is known** — when `min_passes` is reached (good)
 or can no longer be reached (bad) — so `attempts` is an upper bound, not a fixed count.
-(With `max_median` set, all attempts run so the median is meaningful.)
+
+**Benchmarking is just a time-aware `passed`.** There is no `max_median`: `passed` receives
+the `Result` (which carries `.seconds`), so a timing threshold is an ordinary predicate, and
+the quorum count expresses any aggregate over the attempts:
 
 ```python
 test("ctest -R foo")                                       # single run: pass=good, fail=bad
 test("ctest -R foo", attempts=5, min_passes=2)             # flaky: 2 of up to 5 => good
-test("./bench --run", attempts=7, max_median=4.2, warmup=1)  # perf regression
-test("ctest -R foo", attempts=5, min_passes=2, max_median=2.0)  # functional + perf
+test("./bench", attempts=5, min_passes=1, passed=lambda r: r.seconds < 6.7)  # min(5) < 6.7s
+test("./bench", attempts=5,               passed=lambda r: r.seconds < 6.7)  # all 5  < 6.7s
+test("./bench", attempts=5, min_passes=3, passed=lambda r: r.seconds < 6.7)  # median  < 6.7s
 test("./repro", bad_when="pass")                           # bisecting when a bug got "fixed"
 ```
 
-When both `min_passes=` and `max_median=` are set: **GOOD only if it passes the quorum AND
-beats the median; BAD if either fails** (logical AND).
+Aggregate ↔ quorum: `min(times) < T` → `min_passes=1`; `max(times) < T` (all) →
+`min_passes=attempts`; `median < T` → `min_passes=attempts//2 + 1`. Combine functional +
+perf with `passed=lambda r: r.ok and r.seconds < T`.
 
 ### 4.3 `check` — the dumb verb that never decides
 
@@ -327,14 +332,16 @@ These are the decisions made during brainstorming; treat as the starting default
 2. `test`: `attempts=1`, `min_passes=None` (=all) → single run unless asked otherwise.
 3. `warmup` excludes runs from **timing stats only**; the pass quorum is judged over the
    `runs - warmup` non-warmup executions.
-4. `min_passes=` + `max_median=` combine with logical **AND** (GOOD needs both).
+4. `passed` is a predicate over the `Result` (incl. `.seconds`); the quorum
+   (`attempts`/`min_passes`) aggregates per-attempt passes into the verdict.
 5. `run` timeout → **abort** by default (broken harness); `test` timeout → `skip` by
    default (likely an infra hang); override `on_timeout="bad"` for infinite-loop hunts.
 6. `replace`/`fixup` `if_missing="skip"` / unmatched `when` → never silently build wrong.
 7. Tree cleanup defaults to `git reset --hard` + `git checkout -- .` (keeps gitignored
    `build/` for fast incremental builds); `clean="clean"` opts into `git clean -fdx`.
-8. `max_median` is **absolute seconds** for v1. Relative-to-baseline ("15% slower") is a
-   later addition that needs a calibration run at the good anchor.
+8. Timing thresholds live in the `passed` predicate (`r.seconds`), not a dedicated knob;
+   any aggregate (min/median/max < T) is expressed via `min_passes`. Relative-to-baseline
+   ("15% slower") would need a calibration run at the good anchor — a later addition.
 
 ---
 
@@ -559,7 +566,7 @@ there is **no brittle heuristic logic**:
      <good>..<bad>` (range size). Robust, always available.
    - **the commit's optional `eval.json` sidecar** — *recorded facts* written by the engine
      for that commit (exact commands, exit codes, measured timings, flaky ratio, benchmark
-     median, fixups). Read by sha; absent → that row just shows the log+metadata view.
+     timing/fixups). Read by sha; absent → that row just shows the log+metadata view.
 
 **Explicitly NOT used** (removed as brittle): HEAD-reflog timing inference, `/proc` PID
 walking, or any other guesswork. Everything shown is either in the log or a recorded fact
@@ -568,7 +575,7 @@ about a commit — never approximated.
 #### Showing more (commands, timings) — only from recorded facts
 
 The richer detail (commands, per-step exit codes, exact timings, flaky ratio, benchmark
-median, fixups) comes **solely from each commit's `eval.json` sidecar**, which the engine
+timing, fixups) comes **solely from each commit's `eval.json` sidecar**, which the engine
 writes into the per-commit log dir (`<cache>/bisectlib/<bisect-id>/<sha>/`) next to the
 captured `*.log` files:
 
@@ -579,7 +586,7 @@ captured `*.log` files:
     {"verb":"run","cmd":"cmake -B build","code":0,"duration_s":4.1,"log":"01-run.log"},
     {"verb":"run","cmd":"cmake --build build -j","code":0,"duration_s":151.2,"log":"02-run.log"},
     {"verb":"test","cmd":"ctest -R foo","outcome":"good","attempts":5,"executed":5,"passes":2,"min_passes":2,
-     "median_s":1.8,"max_median":2.0,"durations_s":[1.7,1.9,2.4,1.6,1.8],"log":"03-test.log"}
+     "durations_s":[1.7,1.9,2.4,1.6,1.8],"log":"03-test.log"}
   ],
   "fixups": [{"kind":"replace","path":"CMakeLists.txt","detail":"c++14→c++17"}]
 }
@@ -596,7 +603,7 @@ numbers. Timings are always the engine's **measured** durations, never inferred.
   fixups applied, and links to each `*.log`.
 - **HTML**: each row is **expandable** (`<details>`) to reveal a steps sub-table
   (`cmd · exit · time · log`), a flaky pass/fail dot strip (`● ● ○ ● ●` → 2/5), a
-  benchmark **median-vs-threshold** bar, applied fixups, and total eval duration; plus a
+  the per-attempt timings (fastest highlighted), applied fixups, and total eval duration; plus a
   **summary** (total measured wall-clock, slowest step, eval count). Full captured output
   is linked (or inlined for `--open`).
 
@@ -630,7 +637,7 @@ from bisectlib import run, test, replace
 replace("CMakeLists.txt", "c++14", "c++17")          # reverted automatically
 run("cmake -B build")
 run("cmake --build build -j")
-test("./build/bench --json", attempts=7, warmup=2, max_median=4.2)
+test("./build/bench --json", attempts=5, min_passes=1, passed=lambda r: r.seconds < 4.2)
 ```
 
 ### 7.3 Introspection with `check`, plus a known-unbuildable range
@@ -691,7 +698,8 @@ test("./run_tests")
   a conclusive result (no return, no ctx — clean recipes). Tradeoff: implicit control flow;
   you can't inspect a step's output afterward (that's what `check` is for). The explicit
   alternative is `v = test(...); decide(v)` at the bottom. **Leaning implicit.**
-- **Benchmark baseline:** absolute `max_median` now vs. auto-calibrated relative later.
+- **Benchmark baseline:** absolute thresholds in the `passed` predicate now vs.
+  auto-calibrated relative-to-good-anchor later.
 - **Result caching:** cache outcome keyed by commit SHA + recipe hash so re-runs/revisits
   are instant (`--no-cache` to bypass)? **Leaning yes.**
 

@@ -182,6 +182,28 @@ class TestEngine(unittest.TestCase):
         code2, _, _ = run_recipe(d2, body2)
         self.assertEqual(code2, 1)  # bad
 
+    def test_time_predicate(self):
+        # passed sees Result.seconds -> "min of N runs below T" via min_passes=1
+        d = make_repo()
+        ok = ("import bisectlib as b\n"
+              "b.test('sleep 0.05', attempts=3, min_passes=1, "
+              "passed=lambda r: r.seconds < 0.5)\n")
+        code, _, _ = run_recipe(d, ok)
+        self.assertEqual(code, 0)  # 0.05s < 0.5s -> good
+        # an impossible threshold -> bad
+        d2 = make_repo()
+        bad = ("import bisectlib as b\n"
+               "b.test('sleep 0.2', attempts=3, min_passes=1, "
+               "passed=lambda r: r.seconds < 0.01)\n")
+        code2, _, _ = run_recipe(d2, bad)
+        self.assertEqual(code2, 1)  # never fast enough -> bad
+
+    def test_default_passed_is_exit_code(self):
+        # default predicate ignores timing and only checks the exit code
+        d = make_repo()
+        code, _, _ = run_recipe(d, "import bisectlib as b\nb.test('sleep 0.2')\n")
+        self.assertEqual(code, 0)  # slow but exit 0 -> good
+
     def test_bad_when_pass_inverts(self):
         d = make_repo()
         # command always succeeds; bad_when='pass' means success == bad

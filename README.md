@@ -11,8 +11,8 @@ hand-rolled bisect scripts painful:
   silently skipping commits and mis-bisecting. `test()` is the actual verdict.
 - **Flaky tests.** `test("…", attempts=5, min_passes=2)` — pass 2 of up to 5
   tries (it stops as soon as the verdict is decided).
-- **Benchmarks.** `test("…", max_median=4.2, warmup=2)` — bisect a *performance*
-  regression by median runtime.
+- **Benchmarks.** Give `test()` a time-aware predicate: `passed=lambda r: r.seconds < 6.7`.
+  Combined with the quorum it expresses any aggregate — e.g. "min of 5 runs < 6.7s".
 - **Per-range build fixes.** `fixup(patch=…)` / `replace(...)` apply a patch or a
   sed-like edit for the commits that need it, then **auto-revert** so the tree
   stays clean for the next checkout.
@@ -52,9 +52,10 @@ combine with logical AND — any one failing is **bad**, all passing is **good**
 
 ```python
 run("make")
-test("./unit_tests")                       # both must pass for the
-test("./integration_tests --quick")        # commit to count as good
-test("./bench", max_median=4.2, warmup=2)  # …and stay fast
+test("./unit_tests")                  # both must pass for the
+test("./integration_tests --quick")   # commit to count as good
+test("./bench", attempts=5, min_passes=1,           # …and the fastest of 5
+     passed=lambda r: r.seconds < 6.7)              # runs is under 6.7s
 ```
 
 ## The API
@@ -62,8 +63,21 @@ test("./bench", max_median=4.2, warmup=2)  # …and stay fast
 | Verb | Meaning | On failure |
 |------|---------|------------|
 | `run(cmd, skip_on_error=False)` | infrastructure (configure/build/setup) | **abort** (or skip) |
-| `test(cmd, attempts=1, min_passes=None, max_median=None, warmup=0, bad_when="fail")` | the verdict | **bad** |
+| `test(cmd, attempts=1, min_passes=None, passed=None, warmup=0, bad_when="fail")` | the verdict | **bad** |
 | `check(cmd) -> Result` | run once, **never exits** (introspection: `.ok`, `.out`, `.seconds`) | — |
+
+**Flaky & benchmark tests.** `attempts` is the *max* tries, `min_passes` how many must
+pass (default: all); evaluation stops as soon as the verdict is decided. `passed` is a
+predicate over the `Result` (`.ok`, `.seconds`, …) deciding if one attempt passed —
+default `lambda r: r.ok`. Because it sees `.seconds`, timing thresholds are just
+predicates plus the quorum:
+
+```python
+test("./bench", attempts=5, min_passes=1, passed=lambda r: r.seconds < 6.7)  # min < 6.7s
+test("./bench", attempts=5,               passed=lambda r: r.seconds < 6.7)  # all 5 < 6.7s
+test("./bench", attempts=5, min_passes=3, passed=lambda r: r.seconds < 6.7)  # median < 6.7s
+```
+(`min(times)<T` → `min_passes=1`; `max(times)<T` → all; `median<T` → majority.)
 
 ```python
 from bisectlib import run, test, check, replace, fixup, in_range, find_anchors, bisect

@@ -34,7 +34,6 @@ import os
 import re
 import shlex
 import signal
-import statistics
 import subprocess
 import sys
 import time
@@ -423,26 +422,34 @@ def run(cmd: str, *, skip_on_error: bool = False, timeout: Optional[float] = Non
 
 
 def test(cmd: str, *, attempts: int = 1, min_passes: Optional[int] = None,
-         max_median: Optional[float] = None, warmup: int = 0,
-         bad_when: str = "fail", passed: Optional[Callable[[Result], bool]] = None,
-         timeout: Optional[float] = None, on_timeout: str = "skip",
-         name: Optional[str] = None) -> Optional[Result]:
+         passed: Optional[Callable[[Result], bool]] = None, warmup: int = 0,
+         bad_when: str = "fail", timeout: Optional[float] = None,
+         on_timeout: str = "skip", name: Optional[str] = None) -> Optional[Result]:
     """A verdict step. Good -> continue; bad -> exit 1 (BAD).
 
     Like ``run``, a *passing* test continues to the next line, so you can have
     several ``test`` calls and they combine with logical AND — any one failing is
     BAD; reaching the end of the recipe is GOOD. Returns the last Result on good.
 
-    Flaky tests: ``attempts`` is the *maximum* number of tries and ``min_passes``
-    how many must pass. Evaluation **stops as soon as the verdict is known** — at
-    the moment ``min_passes`` is reached (good), or once the remaining attempts
-    can no longer reach it (bad) — so ``attempts`` is an upper bound, not a fixed
-    count. ``min_passes`` defaults to ``attempts`` (every attempt must pass).
+    ``attempts`` is the *maximum* number of tries and ``min_passes`` how many must
+    pass (default: all). Evaluation **stops as soon as the verdict is known** — at
+    the moment ``min_passes`` is reached (good), or once the remaining attempts can
+    no longer reach it (bad) — so ``attempts`` is an upper bound, not a fixed count.
 
-    ``max_median`` adds a perf gate (median runtime over the attempts must be
-    <= this); when set, all ``attempts`` run so the median is meaningful (no early
-    stop). ``warmup`` runs extra leading throwaway executions (excluded from the
-    pass count and timing). ``bad_when="pass"`` inverts the bug direction.
+    ``passed`` decides whether one attempt passed: a callable receiving the
+    :class:`Result` (``.code``, ``.ok``, ``.out``, ``.seconds``) and returning
+    bool. Default: ``lambda r: r.ok`` (exit code 0). Because it sees ``.seconds``,
+    timing thresholds are just predicates combined with the quorum, e.g. the
+    minimum of 5 runs below 6.7s::
+
+        test("./bench", attempts=5, min_passes=1, passed=lambda r: r.seconds < 6.7)
+
+    The quorum count expresses every aggregate: ``min(times) < T`` -> min_passes=1;
+    ``max(times) < T`` (all) -> min_passes=attempts; ``median < T`` ->
+    min_passes=attempts//2 + 1. Combine with success via ``r.ok and r.seconds < T``.
+
+    ``warmup`` runs extra leading throwaway executions (excluded from the pass
+    count). ``bad_when="pass"`` inverts the bug direction.
     """
     _announce()
     _echo_start("test", cmd)
@@ -474,31 +481,22 @@ def test(cmd: str, *, attempts: int = 1, min_passes: Optional[int] = None,
             ok = not ok
         if ok:
             passes += 1
-        # stop as soon as the verdict is locked in (only without a perf gate,
-        # which needs every sample for a meaningful median)
-        if max_median is None:
-            if passes >= min_passes:
-                break
-            if (attempts - executed) < (min_passes - passes):
-                break
+        # stop as soon as the verdict is locked in
+        if passes >= min_passes:
+            break
+        if (attempts - executed) < (min_passes - passes):
+            break
 
-    median = statistics.median(durations) if durations else 0.0
-    pass_ok = passes >= min_passes
-    perf_ok = (max_median is None) or (median <= max_median)
-    good = pass_ok and perf_ok
-
-    extra = {"attempts": attempts, "executed": executed,
-             "passes": passes, "min_passes": min_passes}
-    if max_median is not None:
-        extra.update({"median_s": round(median, 4), "max_median": max_median,
-                      "durations_s": [round(d, 4) for d in durations]})
+    good = passes >= min_passes
+    extra = {"attempts": attempts, "executed": executed, "passes": passes,
+             "min_passes": min_passes, "durations_s": [round(d, 4) for d in durations]}
     _record_step("test", cmd, last, good, extra=extra,
                  outcome="good" if good else "bad")
 
-    summary = f"{passes}/{executed}" + (f" {median:.3g}s" if max_median else "")
+    fastest = f" · min {min(durations):.3g}s" if durations else ""
     _echo_result("test", cmd, good, last.seconds if last else 0.0,
                  "good" if good else "bad")
-    sys.stderr.write(f"   {summary}\n")
+    sys.stderr.write(f"   {passes}/{executed}{fastest}\n")
     if not good:
         _decide(BAD)
     return last  # good: continue to the next step (multiple tests AND together)

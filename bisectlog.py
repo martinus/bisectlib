@@ -415,10 +415,14 @@ def _step_summary(sc: Optional[Sidecar]) -> str:
         return ""
     bits = []
     for s in sc.steps:
-        if s.verb == "test" and "passes" in s.extra and "executed" in s.extra:
-            bits.append(f"{s.extra['passes']}/{s.extra['executed']}")
-        if s.verb == "test" and s.extra.get("median_s") is not None:
-            bits.append(f"{s.extra['median_s']:.3g}s")
+        if s.verb != "test":
+            continue
+        executed = s.extra.get("executed")
+        if executed and executed > 1:
+            bits.append(f"{s.extra.get('passes', 0)}/{executed}")
+            d = s.extra.get("durations_s")
+            if d:
+                bits.append(f"min {min(d):.3g}s")
     if not bits and sc.duration_s is not None:
         bits.append(f"{sc.duration_s:.3g}s")
     return " · ".join(bits)
@@ -659,10 +663,12 @@ def _render_detail_html(r: Row) -> str:
         if s.verb == "test" and "executed" in s.extra and "passes" in s.extra:
             executed = s.extra.get("executed", 0)
             passes = s.extra.get("passes", 0)
-            if executed > 1 or "durations_s" in s.extra:
+            if executed > 1:
                 dots = "".join("<span class='p'>●</span>" for _ in range(passes)) + \
                        "".join("<span class='f'>○</span>" for _ in range(executed - passes))
-                parts.append(f"<div class='dots'>{dots} {passes}/{executed}</div>")
+                d = s.extra.get("durations_s")
+                tinfo = f" · min {min(d):.3g}s" if d else ""
+                parts.append(f"<div class='dots'>{dots} {passes}/{executed}{tinfo}</div>")
     parts.append("<table class='steps'><thead><tr><th>step</th><th>cmd</th>"
                  "<th>exit</th><th>time</th></tr></thead><tbody>")
     for s in sc.steps:
