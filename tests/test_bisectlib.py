@@ -275,19 +275,38 @@ class TestEngine(unittest.TestCase):
         # and the old "bisectlog status:" announcement is gone
         self.assertNotIn("bisectlog status", stderr)
 
-    def test_is_first_run_only_first_time(self):
-        d = make_repo()
-        # setup in the guard appends to a counter; it must run on the first
-        # evaluation only, across repeated invocations of the same bisect session
-        body = ("import bisectlib as b\n"
-                "if b.is_first_run():\n"
-                "    b.run('echo x >> counter')\n"
-                "b.test('true')\n")
-        cache = tempfile.mkdtemp(prefix="bl-first-")
-        for _ in range(3):
-            code, _, _ = run_recipe(d, body, cache=cache)
-            self.assertEqual(code, 0)
-        self.assertEqual(len(Path(d, "counter").read_text().split()), 1)  # ran once
+    def test_is_first_run_once_under_real_bisect(self):
+        # a real `git bisect run` over several commits: the setup guarded by
+        # is_first_run() must execute exactly once across all evaluations, even
+        # though `git bisect log` grows each step (regression guard for the id).
+        d = tempfile.mkdtemp(prefix="bl-first-")
+        sh(d, "git", "init", "-q")
+        sh(d, "git", "config", "user.email", "t@t.t")
+        sh(d, "git", "config", "user.name", "T")
+        shas = []
+        for i in range(1, 13):
+            Path(d, "code.txt").write_text("BUG\n" if i >= 8 else "ok\n")
+            Path(d, f"f{i}").write_text(str(i))
+            sh(d, "git", "add", "-A")
+            sh(d, "git", "commit", "-q", "-m", f"c{i}")
+            shas.append(sh(d, "git", "rev-parse", "HEAD").stdout.strip())
+        counter = Path(d, "counter")  # untracked -> survives checkouts, accumulates
+        Path(d, "recipe.py").write_text(
+            "import sys; sys.path.insert(0, %r)\n" % str(ROOT)
+            + "import bisectlib as b\n"
+            "if b.is_first_run():\n"
+            f"    b.run('echo x >> {counter}')\n"
+            "b.test('! grep -q BUG code.txt')\n")
+        cache = tempfile.mkdtemp(prefix="bl-cache-")
+        env = {**os.environ, "PYTHONPATH": str(ROOT), "NO_COLOR": "1",
+               "XDG_CACHE_HOME": cache}
+        sh(d, "git", "bisect", "start", shas[-1], shas[0], env=env)
+        p = subprocess.run(["git", "bisect", "run", sys.executable, "recipe.py"],
+                           cwd=d, capture_output=True, text=True, env=env)
+        self.assertIn("first bad commit", (p.stdout + p.stderr).lower(), p.stdout)
+        self.assertTrue(counter.exists(), "setup never ran")
+        self.assertEqual(len(counter.read_text().split()), 1)  # ran exactly once
+        sh(d, "git", "bisect", "reset", env=env)
 
     def test_is_first_run_reruns_after_abort(self):
         d = make_repo()

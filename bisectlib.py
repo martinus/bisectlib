@@ -300,12 +300,26 @@ def _bisect_id() -> str:
         top = _toplevel()
     except RuntimeError:
         top = os.getcwd()
-    anchors = ""
-    log = _git("bisect", "log", check=False)
-    for line in log.splitlines():
-        if line.startswith("git bisect ") and (" bad " in line or " good " in line
-                                                or " start " in line):
-            anchors += line + "\n"
+    # Key on the ORIGINAL anchors only (first bad + first good) — these are fixed
+    # for the whole session. `git bisect log` grows with every evaluation, so
+    # hashing the full log would change the id each commit (breaking the marker).
+    bad0 = good0 = None
+    for line in _git("bisect", "log", check=False).splitlines():
+        if not line.startswith("git bisect "):
+            continue
+        try:
+            verb, *args = shlex.split(line)[2:]
+        except ValueError:
+            continue
+        revs = [a for a in args if not a.startswith("-")]
+        if verb == "start" and revs:
+            bad0 = bad0 or revs[0]
+            good0 = good0 or (revs[1] if len(revs) > 1 else None)
+        elif verb == "bad" and revs:
+            bad0 = bad0 or revs[0]
+        elif verb == "good" and revs:
+            good0 = good0 or revs[0]
+    anchors = f"{bad0 or ''}\n{good0 or ''}"
     h = hashlib.sha1((top + "\n" + anchors).encode()).hexdigest()[:12]
     return h
 
