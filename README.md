@@ -167,7 +167,18 @@ Requires Python 3.10+. No third-party dependencies.
 
 ## Examples
 
-See [`examples/`](examples/): `flaky_with_fixup.py`, `perf_regression.py`.
+See [`examples/`](examples/):
+
+| File | Shows |
+|------|-------|
+| `minimal.py` | the simplest recipe: build + test |
+| `flaky_with_fixup.py` | flaky test (`attempts`/`min_passes`) + a per-range patch `fixup` |
+| `perf_regression.py` | a benchmark verdict via a time-aware `passed` predicate + `replace` |
+| `find_when_fixed.py` | `bad_when="pass"` — find when something started *working* |
+| `bisect_on_output.py` | bisect on output *content* (when a warning appeared) |
+| `metric_binary_size.py` | a numeric-budget bisect (binary size crossed a threshold) |
+| `build_fix_cherrypick.py` | keep an un-buildable range testable via `fixup(cherry_pick=…)` |
+| `find_anchors_then_bisect.py` | auto-locate the good/bad range, then bisect — one script |
 
 ## Development
 
