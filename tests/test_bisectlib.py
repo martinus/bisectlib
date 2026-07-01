@@ -154,6 +154,41 @@ class TestEngine(unittest.TestCase):
         self.assertEqual(tracked, "")
         self.assertEqual(Path(d, "code.txt").read_text(), "original\n")
 
+    def test_fixup_patch_reverts(self):
+        d = make_repo()  # has tracked file code.txt = "original\n"
+        # build a patch that turns original -> patched, then revert the tree
+        Path(d, "code.txt").write_text("patched\n")
+        patch = sh(d, "git", "diff").stdout
+        sh(d, "git", "checkout", "--", "code.txt")
+        Path(d, "fix.patch").write_text(patch)
+        body = ("import bisectlib as b\n"
+                "with b.fixup('fix.patch'):\n"
+                "    b.test('grep -q patched code.txt')\n")  # applied inside -> good
+        code, _, _ = run_recipe(d, body)
+        self.assertEqual(code, 0)
+        self.assertEqual(Path(d, "code.txt").read_text(), "original\n")  # reverted
+        self.assertEqual(
+            sh(d, "git", "status", "--porcelain", "--untracked-files=no").stdout.strip(),
+            "")
+
+    def test_fixup_cherrypick_reverts(self):
+        d = make_repo()  # commit c1: code.txt = "original\n"
+        Path(d, "code.txt").write_text("original\nFIXED\n")
+        sh(d, "git", "commit", "-qam", "the fix")
+        fix = sh(d, "git", "rev-parse", "HEAD").stdout.strip()
+        c1 = sh(d, "git", "rev-parse", "HEAD~1").stdout.strip()
+        sh(d, "git", "checkout", "-q", c1)  # simulate a bisect checkout at the old commit
+        body = ("import bisectlib as b\n"
+                f"with b.fixup(cherry_pick={fix!r}):\n"
+                "    b.test('grep -q FIXED code.txt')\n")  # applied inside -> good
+        code, _, _ = run_recipe(d, body)
+        self.assertEqual(code, 0)
+        self.assertNotIn("FIXED", Path(d, "code.txt").read_text())  # reverted
+        self.assertEqual(
+            sh(d, "git", "status", "--porcelain", "--untracked-files=no").stdout.strip(),
+            "")
+        self.assertFalse((Path(d) / ".git" / "CHERRY_PICK_HEAD").exists())
+
     def test_replace_missing_skips(self):
         d = make_repo()
         body = ("import bisectlib as b\n"
