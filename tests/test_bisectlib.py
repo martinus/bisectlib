@@ -692,6 +692,20 @@ class TestEngine(unittest.TestCase):
                "b.hammer('./nonexistent-binary', for_seconds=2, parallel=4)\n")
         self.assertEqual(code, 128)
 
+    def test_hammer_timeout_kills_and_maps_outcome(self):
+        # hammer uses the non-streaming fast path (communicate, no pump thread);
+        # a run exceeding `timeout` must still be killed (not hang past it) and
+        # mapped via on_timeout. 'sleep 30' with timeout=0.3 -> killed -> bad.
+        import time
+        d = make_repo()
+        t0 = time.time()
+        code, _, _ = run_recipe(
+            d, "import bisectlib as b\n"
+               "b.hammer('sleep 30', for_seconds=10, parallel=1, "
+               "timeout=0.3, on_timeout='bad')\n")
+        self.assertEqual(code, 1)                       # timeout -> bad
+        self.assertLess(time.time() - t0, 15, "timed-out run was not killed")
+
     # ----------------------------------------------------- git helper predicates
     def test_git_helpers(self):
         # sha()/subject()/touches()/is_clean() against a real HEAD, in-process so

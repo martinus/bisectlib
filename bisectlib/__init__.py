@@ -57,7 +57,7 @@ from typing import Callable, Literal, NoReturn, Optional, Union
 _BadWhen = Literal["fail", "pass"]
 _OnTimeout = Literal["abort", "skip", "bad"]
 
-__version__ = "0.14.4"
+__version__ = "0.14.5"
 
 __all__ = [
     "run", "test", "hammer", "check",       # the verbs
@@ -309,7 +309,8 @@ def _clean_env(workdir: str) -> dict:
 
 
 def _exec(cmd: str, timeout: Optional[float], log_path: Optional[Path],
-          cwd: Optional[str] = None, stream: bool = True) -> Result:
+          cwd: Optional[str] = None, stream: bool = True,
+          env: Optional[dict] = None) -> Result:
     """Run a shell command, streaming its output live while also capturing it.
 
     Combined stdout+stderr is echoed to this process's stderr as it arrives (so
@@ -320,11 +321,37 @@ def _exec(cmd: str, timeout: Optional[float], log_path: Optional[Path],
 
     ``stream=False`` suppresses the live stderr echo (but still captures + logs).
     Used when many runs execute concurrently, where interleaving dozens of output
-    streams onto one terminal would be unreadable.
+    streams onto one terminal would be unreadable. ``env`` may be pre-built by a
+    caller (hammer) to avoid rebuilding it per run.
     """
     start = time.monotonic()
     workdir = _workdir(cwd)
-    env = _clean_env(workdir)
+    if env is None:
+        env = _clean_env(workdir)
+
+    # Fast path — nothing to stream or log live, so skip the per-run pump thread
+    # and line-by-line loop and let communicate() read the combined output in one
+    # go. This is hammer's path: it may fire many thousands of runs, where a
+    # thread create/join and a Python read loop per run are pure overhead.
+    if not stream and log_path is None:
+        proc = subprocess.Popen(
+            cmd, shell=True, cwd=workdir, env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            start_new_session=True,
+        )
+        timed_out = False
+        try:
+            out, _ = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            out, _ = proc.communicate()
+        code = -1 if timed_out else proc.returncode
+        return Result(code=code, out=out or "", seconds=time.monotonic() - start)
+
     # Open the log up front and write to it as output arrives, so the linked log
     # in status.md exists and grows live (watchable), instead of only appearing
     # once the command finishes. Line-buffered so each line is flushed promptly.
@@ -838,10 +865,12 @@ def hammer(cmd: str, *, for_seconds: float = 60.0, parallel: Optional[int] = Non
         log_fh = open(log_path, "w", buffering=1)
     except OSError:
         log_fh = None
-    # Resolve the working dir once: each run would otherwise re-shell
-    # `git rev-parse --show-toplevel`, needless overhead when firing thousands of
-    # runs. An absolute cwd passes through _workdir untouched.
+    # Resolve the working dir and environment once up front: every run is
+    # identical, so re-resolving the repo root (a `git` subprocess) and rebuilding
+    # the env dict per run would be pure overhead when firing thousands of runs.
+    # An absolute cwd passes through _workdir untouched.
     abs_cwd = _workdir(cwd)
+    run_env = _clean_env(abs_cwd)
 
     st = {"executed": 0, "passes": 0, "failures": 0, "completed": 0,
           "min_dur": None, "last": None, "failing": None,
@@ -888,7 +917,8 @@ def hammer(cmd: str, *, for_seconds: float = 60.0, parallel: Optional[int] = Non
         def top_up() -> None:
             while (len(inflight) < parallel and not st["stop"]
                    and time.monotonic() < deadline):
-                inflight.add(ex.submit(_exec, cmd, timeout, None, abs_cwd, False))
+                inflight.add(ex.submit(_exec, cmd, timeout, None, abs_cwd, False,
+                                       run_env))
 
         top_up()
         while inflight:
